@@ -1,0 +1,5 @@
+python-dotenv
+PyAudio
+Pillow
+mss
+google-generativeai
