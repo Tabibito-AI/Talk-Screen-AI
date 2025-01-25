@@ -1,4 +1,4 @@
-# Voice　AI　Chatbot with Screen Sharing
+# Voice　AI　Chatbot with Screen Sharing for Mac OS
 
 ## Get started with the Gemini API
 This project requires a Gemini API key. Additionally, please be sure to use earphones or headphones to prevent audio loop errors.
