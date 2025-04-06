@@ -35,14 +35,12 @@ system_prompt = os.getenv('SYSTEM_PROMPT', 'You are a professional and detailed 
 
 client = genai.Client(
     api_key=api_key,
-    http_options={"api_version": "v1alpha", "timeout": 10000}  # タイムアウトを10秒に延長
+    http_options={"api_version": "v1alpha", "timeout": 30000}  # タイムアウト30秒
 )
 
 CONFIG = {
-    "generation_config": {
-        "response_modalities": ["AUDIO"],
-        "system_prompt": system_prompt  # システムプロンプトを追加
-    }
+    "response_modalities": ["AUDIO"],
+    "system_instruction": system_prompt
 }
 
 pya = pyaudio.PyAudio()
@@ -74,7 +72,7 @@ class AudioLoop:
                 if text.lower() == "q":
                     self.is_running = False
                     break
-                await self.session.send(text or ".", end_of_turn=True)
+                await self.session.send(input=text or ".", end_of_turn=True)
             except EOFError:
                 print("\nInput stream ended. Retrying in 1 second...")
                 await asyncio.sleep(1)
@@ -111,11 +109,11 @@ class AudioLoop:
                         await asyncio.sleep(1)
                         continue
 
-                    await asyncio.sleep(2.0)  # キャプチャ間隔を2秒に延長
+                    await asyncio.sleep(2.0)  # キャプチャ間隔2秒
                     await self.data_out_queue.put(frame_data)
                 except Exception as e:
                     print(f"Error in get_frames: {e}")
-                    await asyncio.sleep(2)  # エラー時の待機時間も調整
+                    await asyncio.sleep(2)  # エラー時の待機時間2秒
 
     async def send_realtime(self):
         async def process_audio_queue():
@@ -131,7 +129,7 @@ class AudioLoop:
                     retry_count += 1
                     if retry_count >= max_retries:
                         print("Maximum retries exceeded in process_audio_queue, waiting longer...")
-                        await asyncio.sleep(5)  # より長い待機時間
+                        await asyncio.sleep(5)  # 待機時間5秒
                         retry_count = 0
                     else:
                         await asyncio.sleep(1)
@@ -149,7 +147,7 @@ class AudioLoop:
                     retry_count += 1
                     if retry_count >= max_retries:
                         print("Maximum retries exceeded in process_data_queue, waiting longer...")
-                        await asyncio.sleep(5)  # より長い待機時間
+                        await asyncio.sleep(5)  # 待機時間5秒
                         retry_count = 0
                     else:
                         await asyncio.sleep(1)
@@ -194,6 +192,11 @@ class AudioLoop:
                         continue
                     if text := response.text:
                         print(text, end="")
+                        # Check if the user said goodbye (case-insensitive, handles variations)
+                        if text and ("goodbye" in text.strip().lower() or "good bye" in text.strip().lower()):
+                            print("\nUser said goodbye. Exiting...")
+                            self.is_running = False
+                            break # Exit the async for loop
 
                 while not self.audio_in_queue.empty():
                     self.audio_in_queue.get_nowait()
