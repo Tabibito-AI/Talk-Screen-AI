@@ -83,7 +83,7 @@ sequenceDiagram
    - Converts to JPEG format for efficient transmission
 
 4. **AI Model Integration**
-   - Uses Gemini 2.0 Flash experimental model
+   - Uses Gemini 2.5 Flash preview model
    - Supports both audio and text responses
    - Handles real-time data streaming
    - Processes both voice and screen inputs simultaneously
