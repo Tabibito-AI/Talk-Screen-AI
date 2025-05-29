@@ -14,6 +14,7 @@ import PIL.Image
 import mss
 
 from google import genai
+from google.genai import types
 
 if sys.version_info < (3, 11, 0):
     import taskgroup, exceptiongroup
@@ -26,22 +27,24 @@ SEND_SAMPLE_RATE = 16000
 RECEIVE_SAMPLE_RATE = 24000
 CHUNK_SIZE = 1024
 
-MODEL = "models/gemini-2.0-flash-exp" # gemini-2.0-flash-exp / gemini-2.0-flash-thinking-exp-1219
+# 新しいモデル名に更新
+MODEL = "gemini-2.5-flash-preview-native-audio-dialog"
 
 load_dotenv()  # Load variables from .env
 
 api_key = os.getenv('GEMINI_API_KEY')
-system_prompt = os.getenv('SYSTEM_PROMPT', 'You are a professional and detailed AI assistant. Please provide as thorough an answer as possible to the user’s questions.')
+system_prompt = os.getenv('SYSTEM_PROMPT', 'You are a professional and detailed AI assistant. Please provide as thorough an answer as possible to the user\'s questions.')
 
 client = genai.Client(
     api_key=api_key,
     http_options={"api_version": "v1alpha", "timeout": 30000}  # タイムアウト30秒
 )
 
-CONFIG = {
-    "response_modalities": ["AUDIO"],
-    "system_instruction": system_prompt
-}
+# 新しい設定形式に更新
+CONFIG = types.LiveConnectConfig(
+    response_modalities=["AUDIO"],
+    system_instruction=system_prompt
+)
 
 pya = pyaudio.PyAudio()
 
@@ -62,6 +65,25 @@ class AudioLoop:
         
         self.is_running = True
 
+    async def initialize_session(self):
+        """Live API用のセッションを初期化する"""
+        try:
+            self.session = await client.aio.live.connect(model=MODEL, config=CONFIG)
+            print("Live API session established")
+            return True
+        except Exception as e:
+            print(f"Error initializing Live API session: {e}")
+            return False
+
+    async def close_session(self):
+        """Live APIセッションを閉じる"""
+        if hasattr(self, 'session') and self.session:
+            try:
+                await self.session.close()
+                print("Live API session closed")
+            except Exception as e:
+                print(f"Error closing Live API session: {e}")
+
     async def send_text(self):
         while self.is_running:
             try:
@@ -72,7 +94,11 @@ class AudioLoop:
                 if text.lower() == "q":
                     self.is_running = False
                     break
-                await self.session.send(input=text or ".", end_of_turn=True)
+                # 新しいAPIに合わせて送信方法を更新
+                await self.session.send_client_content(
+                    turns={"role": "user", "parts": [{"text": text or "."}]}, 
+                    turn_complete=True
+                )
             except EOFError:
                 print("\nInput stream ended. Retrying in 1 second...")
                 await asyncio.sleep(1)
@@ -122,7 +148,10 @@ class AudioLoop:
             while self.is_running:
                 try:
                     audio_msg = await self.audio_out_queue.get()
-                    await self.session.send(input=audio_msg)
+                    # 新しいAPIに合わせて音声送信方法を更新
+                    await self.session.send_realtime_input(
+                        audio=types.Blob(data=audio_msg["data"], mime_type="audio/pcm;rate=16000")
+                    )
                     retry_count = 0  # 成功したらリトライカウントをリセット
                 except Exception as e:
                     print(f"Error in process_audio_queue: {e}")
@@ -140,7 +169,11 @@ class AudioLoop:
             while self.is_running:
                 try:
                     data_msg = await self.data_out_queue.get()
-                    await self.session.send(input=data_msg)
+                    # 新しいAPIに合わせて画像送信方法を更新
+                    await self.session.send_client_content(
+                        turns={"role": "user", "parts": [{"inline_data": data_msg}]},
+                        turn_complete=False  # 画像は会話の一部として送信
+                    )
                     retry_count = 0  # 成功したらリトライカウントをリセット
                 except Exception as e:
                     print(f"Error in process_data_queue: {e}")
@@ -180,33 +213,33 @@ class AudioLoop:
         except Exception as e:
             print(f"Error initializing audio stream: {e}")
 
-    async def receive_audio(self):
+    # 新しいレスポンス受信メソッド
+    async def receive_responses(self):
+        """Live APIからのレスポンスを受信して処理する"""
         retry_count = 0
         max_retries = 3
         while self.is_running:
             try:
-                turn = self.session.receive()
-                async for response in turn:
-                    if data := response.data:
-                        self.audio_in_queue.put_nowait(data)
-                        continue
-                    if text := response.text:
-                        print(text, end="")
+                async for response in self.session.receive():
+                    if response.audio is not None:
+                        # 音声レスポンスの処理
+                        audio_data = response.audio.data
+                        await self.audio_in_queue.put(audio_data)
+                    elif response.text is not None:
+                        # テキストレスポンスの処理（デバッグ用）
+                        print(response.text, end="")
                         # Check if the user said goodbye (case-insensitive, handles variations)
-                        if text and ("goodbye" in text.strip().lower() or "good bye" in text.strip().lower()):
+                        if response.text and ("goodbye" in response.text.strip().lower() or "good bye" in response.text.strip().lower()):
                             print("\nUser said goodbye. Exiting...")
                             self.is_running = False
                             break # Exit the async for loop
-
-                while not self.audio_in_queue.empty():
-                    self.audio_in_queue.get_nowait()
                 
                 retry_count = 0  # 成功したらリトライカウントをリセット
             except Exception as e:
-                print(f"Error in receive_audio: {e}")
+                print(f"Error in receive_responses: {e}")
                 retry_count += 1
                 if retry_count >= max_retries:
-                    print("Maximum retries exceeded in receive_audio, waiting longer...")
+                    print("Maximum retries exceeded in receive_responses, waiting longer...")
                     await asyncio.sleep(5)  # より長い待機時間
                     retry_count = 0
                 else:
@@ -233,21 +266,23 @@ class AudioLoop:
 
     async def run(self):
         try:
-            async with (
-                client.aio.live.connect(model=MODEL, config=CONFIG) as session,
-                asyncio.TaskGroup() as tg,
-            ):
-                self.session = session
+            # セッション初期化
+            session_initialized = await self.initialize_session()
+            if not session_initialized:
+                print("Failed to initialize Live API session. Exiting.")
+                return
 
-                self.audio_in_queue = asyncio.Queue()
-                self.audio_out_queue = asyncio.Queue(maxsize=5)
-                self.data_out_queue = asyncio.Queue(maxsize=5)
+            self.audio_in_queue = asyncio.Queue()
+            self.audio_out_queue = asyncio.Queue(maxsize=5)
+            self.data_out_queue = asyncio.Queue(maxsize=5)
 
+            # タスクグループの更新
+            async with asyncio.TaskGroup() as tg:
                 send_text_task = tg.create_task(self.send_text())
                 tg.create_task(self.send_realtime())
                 tg.create_task(self.listen_audio())
                 tg.create_task(self.get_frames())
-                tg.create_task(self.receive_audio())
+                tg.create_task(self.receive_responses())  # 新しいレスポンス受信タスク
                 tg.create_task(self.play_audio())
 
                 await send_text_task
@@ -259,6 +294,8 @@ class AudioLoop:
             traceback.print_exception(EG)
         finally:
             self.is_running = False
+            # セッションのクリーンアップ
+            await self.close_session()
             # Stop and close the audio stream if it exists
             if self.audio_stream:
                 self.audio_stream.stop_stream()
